@@ -459,20 +459,26 @@ void FunctionBuilder::EmitIntDivide(TR::IlBuilder* b, const uint8_t* pc, Virtual
   static_assert(std::is_integral<T>::value,
                 "EmitIntDivide only works on integral types");
 
+  using SignedT = typename std::make_signed<T>::type;
+
   EmitBinaryOp<T>(b, pc, stack, [&](TR::IlValue* dividend, TR::IlValue* divisor) {
     EmitTrapIf(b,
-    b->        EqualTo(divisor, b->Const(static_cast<T>(0))),
+    b->        EqualTo(divisor, b->Const(static_cast<SignedT>(0))),
     b->        Const(static_cast<Result_t>(interp::Result::TrapIntegerDivideByZero)),
                pc);
 
-    EmitTrapIf(b,
-    b->        And(
-    b->            EqualTo(dividend, b->Const(std::numeric_limits<T>::min())),
-    b->            EqualTo(divisor, b->Const(static_cast<T>(-1)))),
-    b->        Const(static_cast<Result_t>(interp::Result::TrapIntegerOverflow)),
-               pc);
+    if (std::is_signed<T>::value) {
+      EmitTrapIf(b,
+      b->        And(
+      b->            EqualTo(dividend, b->Const(std::numeric_limits<SignedT>::min())),
+      b->            EqualTo(divisor, b->Const(static_cast<SignedT>(-1)))),
+      b->        Const(static_cast<Result_t>(interp::Result::TrapIntegerOverflow)),
+                 pc);
 
-    return b->Div(dividend, divisor);
+      return b->Div(dividend, divisor);
+    } else {
+      return b->UnsignedDiv(dividend, divisor);
+    }
   });
 }
 
@@ -481,21 +487,29 @@ void FunctionBuilder::EmitIntRemainder(TR::IlBuilder* b, const uint8_t* pc, Virt
   static_assert(std::is_integral<T>::value,
                 "EmitIntRemainder only works on integral types");
 
+  using SignedT = typename std::make_signed<T>::type;
+
   EmitBinaryOp<T>(b, pc, stack, [&](TR::IlValue* dividend, TR::IlValue* divisor) {
     EmitTrapIf(b,
-    b->        EqualTo(divisor, b->Const(static_cast<T>(0))),
+    b->        EqualTo(divisor, b->Const(static_cast<SignedT>(0))),
     b->        Const(static_cast<Result_t>(interp::Result::TrapIntegerDivideByZero)),
                pc);
 
-    TR::IlValue* return_value = b->Const(static_cast<T>(0));
+    TR::IlValue* return_value;
 
-    TR::IlBuilder* div_no_ovf_path = nullptr;
-    b->IfThen(&div_no_ovf_path,
-    b->       Or(
-    b->           NotEqualTo(dividend, b->Const(std::numeric_limits<T>::min())),
-    b->           NotEqualTo(divisor, b->Const(static_cast<T>(-1)))));
-    div_no_ovf_path->StoreOver(return_value,
-                               div_no_ovf_path->Rem(dividend, divisor));
+    if (std::is_signed<T>::value) {
+      return_value = b->Const(static_cast<SignedT>(0));
+
+      TR::IlBuilder* div_no_ovf_path = nullptr;
+      b->IfThen(&div_no_ovf_path,
+      b->       Or(
+      b->          NotEqualTo(dividend, b->Const(std::numeric_limits<SignedT>::min())),
+      b->          NotEqualTo(divisor, b->Const(static_cast<SignedT>(-1)))));
+      div_no_ovf_path->StoreOver(return_value,
+                                div_no_ovf_path->Rem(dividend, divisor));
+    } else {
+      return_value = b->UnsignedRem(dividend, divisor);
+    }
 
     return return_value;
   });
@@ -1034,8 +1048,16 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
       EmitIntDivide<int32_t>(b, pc, &stack);
       break;
 
+    case Opcode::I32DivU:
+      EmitIntDivide<uint32_t>(b, pc, &stack);
+      break;
+
     case Opcode::I32RemS:
       EmitIntRemainder<int32_t>(b, pc, &stack);
+      break;
+
+    case Opcode::I32RemU:
+      EmitIntRemainder<uint32_t>(b, pc, &stack);
       break;
 
     case Opcode::I32And:
@@ -1182,8 +1204,16 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
       EmitIntDivide<int64_t>(b, pc, &stack);
       break;
 
+    case Opcode::I64DivU:
+      EmitIntDivide<uint64_t>(b, pc, &stack);
+      break;
+
     case Opcode::I64RemS:
       EmitIntRemainder<int64_t>(b, pc, &stack);
+      break;
+
+    case Opcode::I64RemU:
+      EmitIntRemainder<uint64_t>(b, pc, &stack);
       break;
 
     case Opcode::I64And:

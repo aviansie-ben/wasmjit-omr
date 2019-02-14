@@ -104,6 +104,37 @@
   (func $div_s_18_i32 (result i32) i32.const 11 i32.const 5 i32.div_s return)
   (func $div_s_19_i32 (result i32) i32.const 17 i32.const 7 i32.div_s return)
 
+  ;; Div_u
+  (func (export "test_div_u_1_i32") (result i32) call $div_u_1_i32)
+  (func (export "test_div_u_2_i32") (result i32) call $div_u_2_i32)
+  (func (export "test_div_u_3_i32") (result i32) call $div_u_3_i32)
+  (func (export "test_div_u_4_i32") (result i32) call $div_u_4_i32)
+  (func (export "test_div_u_5_i32") (result i32) call $div_u_5_i32)
+  (func (export "test_div_u_6_i32") (result i32) call $div_u_6_i32)
+  (func (export "test_div_u_7_i32") (result i32) call $div_u_7_i32)
+  (func (export "test_div_u_8_i32") (result i32) call $div_u_8_i32)
+  (func (export "test_div_u_9_i32") (result i32) call $div_u_9_i32)
+  (func (export "test_div_u_10_i32") (result i32) call $div_u_10_i32)
+  (func (export "test_div_u_11_i32") (result i32) call $div_u_11_i32)
+  (func (export "test_div_u_12_i32") (result i32) call $div_u_12_i32)
+  (func (export "test_div_u_13_i32") (result i32) call $div_u_13_i32)
+  (func (export "test_div_u_14_i32") (result i32) call $div_u_14_i32)
+
+  (func $div_u_1_i32 (result i32) i32.const 1 i32.const 0 i32.div_u return)
+  (func $div_u_2_i32 (result i32) i32.const 0 i32.const 0 i32.div_u return)
+  (func $div_u_3_i32 (result i32) i32.const 0x80000000 i32.const 0xffffffff i32.div_u return)
+  (func $div_u_4_i32 (result i32) i32.const 1 i32.const 1 i32.div_u return)
+  (func $div_u_5_i32 (result i32) i32.const 0 i32.const 1 i32.div_u return)
+  (func $div_u_6_i32 (result i32) i32.const 0xffffffff i32.const 1 i32.div_u return)
+  (func $div_u_7_i32 (result i32) i32.const 0xffffffff i32.const 2 i32.div_u return)
+  (func $div_u_8_i32 (result i32) i32.const 0xffffffff i32.const 0xffffffff i32.div_u return)
+  (func $div_u_9_i32 (result i32) i32.const 0xffffffff i32.const 0x7fffffff i32.div_u return)
+  (func $div_u_10_i32 (result i32) i32.const 0x80000000 i32.const 3 i32.div_u return)
+  (func $div_u_11_i32 (result i32) i32.const 5 i32.const 2 i32.div_u return)
+  (func $div_u_12_i32 (result i32) i32.const 7 i32.const 3 i32.div_u return)
+  (func $div_u_13_i32 (result i32) i32.const 11 i32.const 5 i32.div_u return)
+  (func $div_u_14_i32 (result i32) i32.const 17 i32.const 7 i32.div_u return)
+
   ;; Rem_s
   (func (export "test_rem_s_1_i32") (result i32) call $rem_s_1_i32)
   (func (export "test_rem_s_2_i32") (result i32) call $rem_s_2_i32)
@@ -146,7 +177,37 @@
   (func $rem_s_18_i32 (result i32) i32.const -7 i32.const -3 i32.rem_s return)
   (func $rem_s_19_i32 (result i32) i32.const 11 i32.const 5 i32.rem_s return)
   (func $rem_s_20_i32 (result i32) i32.const 17 i32.const 7 i32.rem_s return)
-  
+
+  ;; Rem_u
+  (func (export "test_rem_u_1_i32") (result i32) call $rem_u_1_i32)
+  (func (export "test_rem_u_2_i32") (result i32) call $rem_u_2_i32)
+  (func (export "test_rem_u_3_i32") (result i32) call $rem_u_3_i32)
+  (func (export "test_rem_u_4_i32") (result i32) call $rem_u_4_i32)
+  (func (export "test_rem_u_5_i32") (result i32) call $rem_u_5_i32)
+  (func (export "test_rem_u_6_i32") (result i32) call $rem_u_6_i32)
+  (func (export "test_rem_u_7_i32") (result i32) call $rem_u_7_i32)
+  (func (export "test_rem_u_8_i32") (result i32) call $rem_u_8_i32)
+  (func (export "test_rem_u_9_i32") (result i32) call $rem_u_9_i32)
+  (func (export "test_rem_u_10_i32") (result i32) call $rem_u_10_i32)
+  (func (export "test_rem_u_11_i32") (result i32) call $rem_u_11_i32)
+  (func (export "test_rem_u_12_i32") (result i32) call $rem_u_12_i32)
+  (func (export "test_rem_u_13_i32") (result i32) call $rem_u_13_i32)
+  (func (export "test_rem_u_14_i32") (result i32) call $rem_u_14_i32)
+
+  (func $rem_u_1_i32 (result i32) i32.const 1 i32.const 0 i32.rem_u return)
+  (func $rem_u_2_i32 (result i32) i32.const 0 i32.const 0 i32.rem_u return)
+  (func $rem_u_3_i32 (result i32) i32.const 0x80000000 i32.const 0xffffffff i32.rem_u return)
+  (func $rem_u_4_i32 (result i32) i32.const 1 i32.const 1 i32.rem_u return)
+  (func $rem_u_5_i32 (result i32) i32.const 0 i32.const 1 i32.rem_u return)
+  (func $rem_u_6_i32 (result i32) i32.const 0xffffffff i32.const 1 i32.rem_u return)
+  (func $rem_u_7_i32 (result i32) i32.const 0xffffffff i32.const 2 i32.rem_u return)
+  (func $rem_u_8_i32 (result i32) i32.const 0xffffffff i32.const 0xffffffff i32.rem_u return)
+  (func $rem_u_9_i32 (result i32) i32.const 0xffffffff i32.const 0x7fffffff i32.rem_u return)
+  (func $rem_u_10_i32 (result i32) i32.const 0x80000000 i32.const 3 i32.rem_u return)
+  (func $rem_u_11_i32 (result i32) i32.const 5 i32.const 2 i32.rem_u return)
+  (func $rem_u_12_i32 (result i32) i32.const 7 i32.const 3 i32.rem_u return)
+  (func $rem_u_13_i32 (result i32) i32.const 11 i32.const 5 i32.rem_u return)
+  (func $rem_u_14_i32 (result i32) i32.const 17 i32.const 7 i32.rem_u return)
 )
 (;; STDOUT ;;;
 test_add_1_i32() => i32:2
@@ -193,6 +254,20 @@ test_div_s_16_i32() => i32:4294967294
 test_div_s_17_i32() => i32:2
 test_div_s_18_i32() => i32:2
 test_div_s_19_i32() => i32:2
+test_div_u_1_i32() => error: integer divide by zero
+test_div_u_2_i32() => error: integer divide by zero
+test_div_u_3_i32() => i32:0
+test_div_u_4_i32() => i32:1
+test_div_u_5_i32() => i32:0
+test_div_u_6_i32() => i32:4294967295
+test_div_u_7_i32() => i32:2147483647
+test_div_u_8_i32() => i32:1
+test_div_u_9_i32() => i32:2
+test_div_u_10_i32() => i32:715827882
+test_div_u_11_i32() => i32:2
+test_div_u_12_i32() => i32:2
+test_div_u_13_i32() => i32:2
+test_div_u_14_i32() => i32:2
 test_rem_s_1_i32() => error: integer divide by zero
 test_rem_s_2_i32() => error: integer divide by zero
 test_rem_s_3_i32() => i32:0
@@ -213,4 +288,18 @@ test_rem_s_17_i32() => i32:1
 test_rem_s_18_i32() => i32:4294967295
 test_rem_s_19_i32() => i32:1
 test_rem_s_20_i32() => i32:3
+test_rem_u_1_i32() => error: integer divide by zero
+test_rem_u_2_i32() => error: integer divide by zero
+test_rem_u_3_i32() => i32:2147483648
+test_rem_u_4_i32() => i32:0
+test_rem_u_5_i32() => i32:0
+test_rem_u_6_i32() => i32:0
+test_rem_u_7_i32() => i32:1
+test_rem_u_8_i32() => i32:0
+test_rem_u_9_i32() => i32:1
+test_rem_u_10_i32() => i32:2
+test_rem_u_11_i32() => i32:1
+test_rem_u_12_i32() => i32:1
+test_rem_u_13_i32() => i32:1
+test_rem_u_14_i32() => i32:3
 ;;; STDOUT ;;)
