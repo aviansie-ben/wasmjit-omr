@@ -18,22 +18,38 @@
 #define JIT_ENVIRONMENT_HPP
 
 #include "src/common.h"
+#include "common.h"
+#include "hook.h"
 
 #include <cstdint>
 
 namespace wabt {
 namespace jit {
 
-struct ThreadInfo;
+struct Options {
+  bool enabled = true;
+  bool trap_on_failed_comp = false;
+  uint32_t jit_threshold = 1;
 
-using Result_t = int32_t;
-using JITedFunction = Result_t (*)(ThreadInfo*, Index);
+  HookAbilities hook_abilities;
+
+  static Options without_jit() {
+    Options o;
+    o.enabled = false;
+
+    return o;
+  }
+};
 
 class JitEnvironment {
 public:
-  JitEnvironment();
+  JitEnvironment(Options options);
   ~JitEnvironment();
+
+  const Options& options() const { return options_; }
 private:
+  Options options_;
+
   static unsigned short instance_count_;
 };
 

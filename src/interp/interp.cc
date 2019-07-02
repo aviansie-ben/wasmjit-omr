@@ -35,6 +35,8 @@
 namespace wabt {
 namespace interp {
 
+#define PRE_TRAP(r)
+
 // Differs from the normal CHECK_RESULT because this one is meant to return the
 // interp Result type.
 #undef CHECK_RESULT
@@ -52,6 +54,7 @@ namespace interp {
   do {                             \
     Result result = (__VA_ARGS__); \
     if (result != Result::Ok) {    \
+      PRE_TRAP(result);            \
       return result;               \
     }                              \
   } while (0)
@@ -131,7 +134,7 @@ void WriteCall(Stream* stream,
   }
 }
 
-Environment::Environment() : istream_(new OutputBuffer()) {}
+Environment::Environment(jit::Options options) : istream_(new OutputBuffer()), jit_env_(options) {}
 
 Index Environment::FindModuleIndex(string_view name) const {
   auto iter = module_bindings_.find(name.to_string());
@@ -154,14 +157,16 @@ Module* Environment::FindRegisteredModule(string_view name) {
   return modules_[iter->second.index].get();
 }
 
-Thread::Options::Options(uint32_t value_stack_size, uint32_t call_stack_size)
-    : value_stack_size(value_stack_size), call_stack_size(call_stack_size) {}
+Thread::Options::Options(uint32_t value_stack_size, uint32_t call_stack_size, jit::ThreadHooks hooks)
+    : value_stack_size(value_stack_size), call_stack_size(call_stack_size), hooks(hooks) {}
 
 Thread::Thread(Environment* env, const Options& options)
     : env_(env),
       value_stack_(options.value_stack_size),
       call_stack_(options.call_stack_size),
+      hooks_(options.hooks),
       jit_th_(new jit::ThreadInfo()) {
+  hooks_.validate(env->JitOptions().hook_abilities);
   jit_th_->call_stack_max = call_stack_.data() + call_stack_.size();
   jit_th_->jit_fn_table = nullptr;
   jit_th_->thread = this;
@@ -735,7 +740,11 @@ ValueTypeRep<double> CanonicalizeNan<double>(ValueTypeRep<double> rep) {
   return FloatTraits<double>::CanonicalizeNan(rep);
 }
 
-#define TRAP(type) return Result::Trap##type
+#define TRAP(type)                \
+  do {                            \
+    PRE_TRAP(Result::Trap##type); \
+    return Result::Trap##type;    \
+  } while (0)
 #define TRAP_UNLESS(cond, type) TRAP_IF(!(cond), type)
 #define TRAP_IF(cond, type)    \
   do {                         \
@@ -1640,14 +1649,14 @@ ValueTypeRep<R> SimdReplaceLane(V value, uint32_t lane_idx, T lane_val) {
 }
 
 Result Environment::TryJit(Thread* t, DefinedFunc* fn, Index ind) {
-  if (!enable_jit) {
+  if (!JitOptions().enabled) {
     return Result::Ok;
   }
 
   if (!fn->tried_jit_) {
     fn->num_calls_++;
 
-    if (fn->num_calls_ >= jit_threshold) {
+    if (fn->num_calls_ >= JitOptions().jit_threshold) {
       fn->jit_fn_ = jit::compile(t, fn);
       fn->tried_jit_ = true;
 
@@ -1656,7 +1665,7 @@ Result Environment::TryJit(Thread* t, DefinedFunc* fn, Index ind) {
     }
   }
 
-  TRAP_IF(fn->tried_jit_ && !fn->jit_fn_ && trap_on_failed_comp, FailedJITCompilation);
+  TRAP_IF(fn->tried_jit_ && !fn->jit_fn_ && JitOptions().trap_on_failed_comp, FailedJITCompilation);
   return Result::Ok;
 }
 
@@ -1701,35 +1710,26 @@ Result Thread::CallHost(HostFunc* func) {
   return Result::Ok;
 }
 
-class TempPc {
-  public:
-    TempPc(Thread* thread)
-      : thread(thread),
-        istream(thread->env()->istream().data.data()),
-        pc(&istream[thread->pc()]) {}
-    TempPc(const TempPc&) = delete;
-    ~TempPc() { Commit(); }
-
-    TempPc& operator=(const TempPc&) = delete;
-
-    void Commit() { thread->set_pc(pc - istream); }
-    void Reload() { pc = istream + thread->pc(); }
-
-    Thread* thread;
-    const uint8_t* istream;
-    const uint8_t* pc;
-};
-
+#undef PRE_TRAP
+#define PRE_TRAP(r)            \
+  do {                         \
+    if (hooks_.on_trap) {      \
+      hooks_.on_trap(this, r); \
+    }                          \
+  } while (0)
 Result Thread::Run(int num_instructions) {
   Result result = Result::Ok;
 
   this->in_jit_ = false;
 
-  TempPc tpc(this);
-  const uint8_t*& istream = tpc.istream;
-  const uint8_t*& pc = tpc.pc;
+  const uint8_t* istream = GetIstream();
+  const uint8_t* pc = istream + pc_;
 
   for (int i = 0; i < num_instructions; ++i) {
+    set_pc(pc - istream);
+    if (hooks_.on_instr)
+      hooks_.on_instr(this);
+
     Opcode opcode = ReadOpcode(&pc);
     assert(!opcode.IsInvalid());
     switch (opcode) {
@@ -1769,13 +1769,17 @@ Result Thread::Run(int num_instructions) {
         break;
       }
 
-      case Opcode::Return:
+      case Opcode::Return: {
+        if (hooks_.on_return)
+          hooks_.on_return(this);
+
         if (call_stack_top_ == 0 || call_stack_top_ == last_jit_frame_) {
           result = Result::Returned;
           goto exit_loop;
         }
         GOTO(PopCall());
         break;
+      }
 
       case Opcode::Unreachable:
         TRAP(Unreachable);
@@ -1833,6 +1837,7 @@ Result Thread::Run(int num_instructions) {
 
         CHECK_TRAP(PushCall(pc));
         GOTO(fn->offset);
+        pc_ = pc - istream;
         CHECK_TRAP(env_->TryJit(this, fn, func_index));
 
         if (fn->jit_fn_) {
@@ -1850,13 +1855,15 @@ Result Thread::Run(int num_instructions) {
             pc_ = jit_th_->pc;
             in_jit_ = jit_th_->in_jit;
 
-            // We don't want to overwrite the pc of the JITted function if it traps
-            tpc.Reload();
             return result;
           }
 
           in_jit_ = false;
           GOTO(PopCall());
+        } else {
+          if (hooks_.on_call) {
+            hooks_.on_call(this);
+          }
         }
         break;
       }
@@ -1878,6 +1885,7 @@ Result Thread::Run(int num_instructions) {
 
           CHECK_TRAP(PushCall(pc));
           GOTO(fn->offset);
+          pc_ = pc - istream;
           CHECK_TRAP(env_->TryJit(this, fn, func_index));
 
           if (fn->jit_fn_) {
@@ -1895,13 +1903,14 @@ Result Thread::Run(int num_instructions) {
               pc_ = jit_th_->pc;
               in_jit_ = jit_th_->in_jit;
 
-              // We don't want to overwrite the pc of the JITted function if it traps
-              tpc.Reload();
               return result;
             }
 
             in_jit_ = false;
             GOTO(PopCall());
+          } else {
+            if (hooks_.on_call)
+              hooks_.on_call(this);
           }
         }
         break;
@@ -3574,6 +3583,7 @@ Result Thread::Run(int num_instructions) {
   }
 
 exit_loop:
+  set_pc(pc - istream);
   return result;
 }
 
@@ -3692,6 +3702,11 @@ ExecResult Executor::RunExportByName(Module* module,
 Result Executor::RunDefinedFunction(IstreamOffset function_offset) {
   Result result = Result::Ok;
   thread_.set_pc(function_offset);
+
+  auto& hook = thread_.hooks_.on_call;
+  if (hook)
+    hook(&thread_);
+
   if (trace_stream_) {
     const int kNumInstructions = 1;
     while (result == Result::Ok) {

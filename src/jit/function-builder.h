@@ -81,7 +81,7 @@ class FunctionBuilder : public TR::MethodBuilder {
   void TearDownLocals(TR::IlBuilder* b);
   uint32_t GetLocalOffset(VirtualStack* stack, Type* type, uint32_t depth);
 
-  void MoveToPhysStack(TR::IlBuilder* b, const uint8_t* pc, VirtualStack* stack, uint32_t depth);
+  void MoveToPhysStack(TR::IlBuilder* b, VirtualStack* stack, uint32_t depth);
   void MoveFromPhysStack(TR::IlBuilder* b, VirtualStack* stack, const std::vector<Type>& types);
   TR::IlValue* PickPhys(TR::IlBuilder* b, uint32_t depth);
 
@@ -93,31 +93,33 @@ class FunctionBuilder : public TR::MethodBuilder {
   TR::IlValue* Const(TR::IlBuilder* b, const interp::TypedValue* v) const;
 
   template <typename T, typename TResult = T, typename TOpHandler>
-  void EmitBinaryOp(TR::IlBuilder* b, const uint8_t* pc, VirtualStack* stack, TOpHandler h);
+  void EmitBinaryOp(TR::IlBuilder* b, VirtualStack* stack, TOpHandler h);
 
   template <typename T, typename TResult = T, typename TOpHandler>
-  void EmitUnaryOp(TR::IlBuilder* b, const uint8_t* pc, VirtualStack* stack, TOpHandler h);
+  void EmitUnaryOp(TR::IlBuilder* b, VirtualStack* stack, TOpHandler h);
 
   template <typename T>
-  void EmitIntDivide(TR::IlBuilder* b, const uint8_t* pc, VirtualStack* stack);
+  void EmitIntDivide(TR::IlBuilder* b, VirtualStack* stack);
 
   template <typename T>
-  void EmitIntRemainder(TR::IlBuilder* b, const uint8_t* pc, VirtualStack* stack);
+  void EmitIntRemainder(TR::IlBuilder* b, VirtualStack* stack);
 
   template <typename T>
   TR::IlValue* EmitMemoryPreAccess(TR::IlBuilder* b, const uint8_t** pc, VirtualStack* stack);
 
-  void EmitTrap(TR::IlBuilder* b, TR::IlValue* result, const uint8_t* pc);
-  void EmitCheckTrap(TR::IlBuilder* b, TR::IlValue* result, const uint8_t* pc);
-  void EmitTrapIf(TR::IlBuilder* b, TR::IlValue* condition, TR::IlValue* result, const uint8_t* pc);
+  void EmitCommitPc(TR::IlBuilder* b);
+
+  void EmitTrap(TR::IlBuilder* b, TR::IlValue* result, bool commit_pc = true);
+  void EmitCheckTrap(TR::IlBuilder* b, TR::IlValue* result, bool commit_pc = true);
+  void EmitTrapIf(TR::IlBuilder* b, TR::IlValue* condition, TR::IlValue* result, bool commit_pc = true);
 
   template <typename F>
   TR::IlValue* EmitIsNan(TR::IlBuilder* b, TR::IlValue* value);
 
   template <typename ToType, typename FromType>
-  void EmitTruncation(TR::IlBuilder* b, const uint8_t* pc, VirtualStack* stack);
+  void EmitTruncation(TR::IlBuilder* b, VirtualStack* stack);
   template <typename ToType, typename FromType>
-  void EmitUnsignedTruncation(TR::IlBuilder* b, const uint8_t* pc, VirtualStack* stack);
+  void EmitUnsignedTruncation(TR::IlBuilder* b, VirtualStack* stack);
 
   template <typename ToType, typename FromType>
   void EmitSaturatingTruncation(TR::IlBuilder* b, VirtualStack* stack);

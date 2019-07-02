@@ -205,19 +205,25 @@ static void InitEnvironment(Environment* env) {
       return pair.second;
     };
   }
-  if (s_disable_jit) {
-    env->enable_jit = false;
-  }
-  if (s_trap_on_failed_comp) {
-    env->trap_on_failed_comp = true;
-  }
+}
 
-  env->jit_threshold = s_jit_threshold;
+static wabt::jit::Options CreateJitOptions() {
+  wabt::jit::Options options;
+
+  if (s_disable_jit)
+    options.enabled = false;
+
+  if (s_trap_on_failed_comp)
+    options.trap_on_failed_comp = true;
+
+  options.jit_threshold = s_jit_threshold;
+
+  return options;
 }
 
 static wabt::Result ReadAndRunModule(const char* module_filename) {
   wabt::Result result;
-  Environment env;
+  Environment env(CreateJitOptions());
   InitEnvironment(&env);
 
   Errors errors;

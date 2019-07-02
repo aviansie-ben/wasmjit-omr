@@ -847,12 +847,10 @@ static void InitEnvironment(Environment* env) {
   host_module->AppendGlobalExport("global_i64", false, uint64_t(666));
   host_module->AppendGlobalExport("global_f32", false, float(666.6f));
   host_module->AppendGlobalExport("global_f64", false, double(666.6));
-
-  env->enable_jit = false;
 }
 
 CommandRunner::CommandRunner()
-    : executor_(&env_, s_trace_stream, s_thread_options) {
+    : env_(jit::Options::without_jit()), executor_(&env_, s_trace_stream, s_thread_options) {
   InitEnvironment(&env_);
 }
 
@@ -1105,7 +1103,7 @@ wabt::Result CommandRunner::OnActionCommand(const ActionCommand* command) {
 
 wabt::Result CommandRunner::OnAssertMalformedCommand(
     const AssertMalformedCommand* command) {
-  Environment env;
+  Environment env(jit::Options::without_jit());
   InitEnvironment(&env);
 
   wabt::Result result =
@@ -1154,7 +1152,7 @@ wabt::Result CommandRunner::OnAssertUnlinkableCommand(
 
 wabt::Result CommandRunner::OnAssertInvalidCommand(
     const AssertInvalidCommand* command) {
-  Environment env;
+  Environment env(jit::Options::without_jit());
   InitEnvironment(&env);
 
   wabt::Result result = ReadInvalidModule(

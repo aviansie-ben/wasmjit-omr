@@ -429,11 +429,7 @@ class Environment {
     size_t istream_size = 0;
   };
 
-  bool enable_jit = true;
-  bool trap_on_failed_comp = false;
-  uint32_t jit_threshold = 1;
-
-  Environment();
+  Environment(jit::Options options = jit::Options());
 
   OutputBuffer& istream() { return *istream_; }
   void SetIstream(std::unique_ptr<OutputBuffer> istream) {
@@ -563,6 +559,8 @@ class Environment {
   void Disassemble(Stream* stream, IstreamOffset from, IstreamOffset to);
   void DisassembleModule(Stream* stream, Module*);
 
+  const jit::Options& JitOptions() { return jit_env_.options(); }
+
  private:
   friend class Thread;
   friend class wabt::jit::FunctionBuilder;
@@ -604,10 +602,12 @@ class Thread {
     static const uint32_t kDefaultCallStackSize = 64 * 1024;
 
     explicit Options(uint32_t value_stack_size = kDefaultValueStackSize,
-                     uint32_t call_stack_size = kDefaultCallStackSize);
+                     uint32_t call_stack_size = kDefaultCallStackSize,
+                     jit::ThreadHooks hooks = jit::ThreadHooks());
 
     uint32_t value_stack_size;
     uint32_t call_stack_size;
+    jit::ThreadHooks hooks;
   };
 
   explicit Thread(Environment*, const Options& = Options());
@@ -628,9 +628,15 @@ class Thread {
 
   Result CallHost(HostFunc*);
 
+  const jit::ThreadHooks& ThreadHooks() const { return hooks_; }
+
  private:
   friend class jit::FunctionBuilder;
   friend jit::Result_t jit::InterpThunk(jit::ThreadInfo*, Index);
+  friend void jit::JitHookCall(jit::ThreadInfo*);
+  friend void jit::JitHookReturn(jit::ThreadInfo*);
+  friend void jit::JitHookInstr(jit::ThreadInfo*);
+  friend void jit::JitHookTrap(jit::ThreadInfo*, Result_t);
   friend class Executor;
   const uint8_t* GetIstream() const { return env_->istream_->data.data(); }
 
@@ -723,6 +729,8 @@ class Thread {
   uint32_t last_jit_frame_ = 0;
   IstreamOffset pc_ = 0;
   bool in_jit_ = false;
+
+  jit::ThreadHooks hooks_;
 
   std::unique_ptr<jit::ThreadInfo> jit_th_;
 };

@@ -30,26 +30,38 @@
 namespace wabt {
 namespace jit {
 
-Result_t FunctionBuilder::CallIndirectHelper(ThreadInfo* th, Index table_index, Index sig_index, Index entry_index) {
-  using namespace wabt::interp;
-  auto* env = th->thread->env_;
+static Result_t CallIndirectPrepare(ThreadInfo* th, Index table_index, Index sig_index, Index entry_index, Index* ind_out) {
+  auto* env = th->thread->env();
+  auto* table = env->GetTable(table_index);
 
-  Table* table = &env->tables_[table_index];
   TRAP_IF_HELPER(entry_index >= table->func_indexes.size(), UndefinedTableIndex);
   Index func_index = table->func_indexes[entry_index];
-  TRAP_IF_HELPER(func_index == kInvalidIndex, UninitializedTableElement);
-  Func* func = env->funcs_[func_index].get();
-  TRAP_UNLESS_HELPER(env->FuncSignaturesAreEqual(func->sig_index, sig_index),
-                     IndirectCallSignatureMismatch);
 
+  TRAP_IF_HELPER(func_index == kInvalidIndex, UninitializedTableElement);
+  interp::Func* fn = env->GetFunc(func_index);
+
+  TRAP_UNLESS_HELPER(env->FuncSignaturesAreEqual(fn->sig_index, sig_index), IndirectCallSignatureMismatch);
   TRAP_IF_HELPER(th->call_stack == th->call_stack_max, CallStackExhausted);
-  th->call_stack->pc = th->pc;
+  th->call_stack->pc = th->pc + 12;
   th->call_stack->is_jit = true;
   th->call_stack->is_jit_compiling = false;
   th->call_stack++;
 
-  auto result = th->jit_fn_table[func_index](th, func_index);
+  *ind_out = func_index;
 
+  return static_cast<Result_t>(interp::Result::Ok);
+}
+
+Result_t FunctionBuilder::CallIndirectHelper(ThreadInfo* th, Index table_index, Index sig_index, Index entry_index) {
+  Index func_index;
+
+  auto result = CallIndirectPrepare(th, table_index, sig_index, entry_index, &func_index);
+  if (result != static_cast<Result_t>(interp::Result::Ok)) {
+    JitHookTrap(th, result);
+    return result;
+  }
+
+  result = th->jit_fn_table[func_index](th, func_index);
   if (result == static_cast<Result_t>(interp::Result::Ok))
     th->call_stack--;
 
@@ -80,6 +92,8 @@ FunctionBuilder::FunctionBuilder(interp::Thread* thread, interp::DefinedFunc* fn
   DefineParameter("index", Int32);
   DefineReturnType(toIlType<Result_t>(types));
 
+  DefineLocal("pc", Int32);
+
   DefineFunction("wasm_fn", __FILE__, "0", nullptr, toIlType<Result_t>(types), 2, Address, Int32);
   DefineFunction("f32_sqrt", __FILE__, "0",
                  reinterpret_cast<void*>(static_cast<float (*)(float)>(std::sqrt)),
@@ -107,12 +121,40 @@ FunctionBuilder::FunctionBuilder(interp::Thread* thread, interp::DefinedFunc* fn
                  toIlType<uint32_t>(types),
                  toIlType<uint64_t>(types),
                  toIlType<uint32_t>(types));
+
+  DefineFunction("JitHookCall", __FILE__, "0",
+                 reinterpret_cast<void*>(JitHookCall),
+                 NoType,
+                 1,
+                 Address);
+  DefineFunction("JitHookReturn", __FILE__, "0",
+                 reinterpret_cast<void*>(JitHookReturn),
+                 NoType,
+                 1,
+                 Address);
+  DefineFunction("JitHookInstr", __FILE__, "0",
+                 reinterpret_cast<void*>(JitHookInstr),
+                 NoType,
+                 1,
+                 Address);
+  DefineFunction("JitHookTrap", __FILE__, "0",
+                 reinterpret_cast<void*>(JitHookTrap),
+                 NoType,
+                 2,
+                 Address,
+                 toIlType<Result_t>(types));
 }
 
 bool FunctionBuilder::buildIL() {
   const uint8_t* istream = thread_->GetIstream();
   const uint8_t* pc = &istream[fn_->offset];
   auto* state = new WabtState();
+
+  if (thread_->env_->JitOptions().hook_abilities.may_trace_call) {
+    auto* thread = Load("thread");
+    StoreIndirect("ThreadInfo", "pc", thread, ConstInt32(fn_->offset));
+    Call("JitHookCall", 1, thread);
+  }
 
   SetUpLocals(this, &pc, &state->stack);
   setVMState(state);
@@ -143,6 +185,13 @@ void FunctionBuilder::SetUpLocals(TR::IlBuilder* b, const uint8_t** pc, VirtualS
 
   if (fn_->local_count == 0) return;
 
+  b->Store("pc", b->ConstInt32(*pc - thread_->GetIstream()));
+
+  if (thread_->env_->JitOptions().hook_abilities.may_trace_instr) {
+    EmitCommitPc(b);
+    b->Call("JitHookInstr", 1, b->Load("thread"));
+  }
+
   Opcode opcode = interp::ReadOpcode(pc);
   TR_ASSERT_FATAL(opcode == Opcode::InterpAlloca, "Function with locals is missing alloca");
 
@@ -166,8 +215,8 @@ void FunctionBuilder::SetUpLocals(TR::IlBuilder* b, const uint8_t** pc, VirtualS
   b->       UnsignedGreaterOrEqualTo(
                 stack_top,
   b->           Const(static_cast<int32_t>(thread_->value_stack_.size()))));
-  overflow_handler->Return(
-  overflow_handler->    Const(static_cast<Result_t>(interp::Result::TrapValueStackExhausted)));
+  EmitTrap(overflow_handler,
+           overflow_handler->Const(static_cast<Result_t>(interp::Result::TrapValueStackExhausted)));
 
   TR::IlBuilder* set_zero = nullptr;
   b->ForLoopUp("i", &set_zero, old_value_stack_top, stack_top, b->Const(1));
@@ -200,7 +249,7 @@ uint32_t FunctionBuilder::GetLocalOffset(VirtualStack* stack, Type* type, uint32
   return fn_->param_and_local_types.size() - i;
 }
 
-void FunctionBuilder::MoveToPhysStack(TR::IlBuilder* b, const uint8_t* pc, VirtualStack* stack, uint32_t depth) {
+void FunctionBuilder::MoveToPhysStack(TR::IlBuilder* b, VirtualStack* stack, uint32_t depth) {
   if (depth == 0)
     return;
 
@@ -219,8 +268,7 @@ void FunctionBuilder::MoveToPhysStack(TR::IlBuilder* b, const uint8_t* pc, Virtu
   b->            UnsignedLessThan(
                      new_stack_top,
                      stack_top)),
-  b->        Const(static_cast<Result_t>(interp::Result::TrapValueStackExhausted)),
-             pc);
+  b->        Const(static_cast<Result_t>(interp::Result::TrapValueStackExhausted)));
 
   for (size_t i = 0; i < depth; i++) {
     auto* val = stack->Pick(depth - i - 1);
@@ -359,7 +407,7 @@ TR::IlValue* FunctionBuilder::Const(TR::IlBuilder* b, const interp::TypedValue* 
 }
 
 template <typename T, typename TResult, typename TOpHandler>
-void FunctionBuilder::EmitBinaryOp(TR::IlBuilder* b, const uint8_t* pc, VirtualStack* stack, TOpHandler h) {
+void FunctionBuilder::EmitBinaryOp(TR::IlBuilder* b, VirtualStack* stack, TOpHandler h) {
   auto* rhs = stack->Pop();
   auto* lhs = stack->Pop();
 
@@ -367,42 +415,39 @@ void FunctionBuilder::EmitBinaryOp(TR::IlBuilder* b, const uint8_t* pc, VirtualS
 }
 
 template <typename T, typename TResult, typename TOpHandler>
-void FunctionBuilder::EmitUnaryOp(TR::IlBuilder* b, const uint8_t* pc, VirtualStack* stack, TOpHandler h) {
+void FunctionBuilder::EmitUnaryOp(TR::IlBuilder* b, VirtualStack* stack, TOpHandler h) {
   stack->Push(h(stack->Pop()));
 }
 
 template <typename T>
-void FunctionBuilder::EmitIntDivide(TR::IlBuilder* b, const uint8_t* pc, VirtualStack* stack) {
+void FunctionBuilder::EmitIntDivide(TR::IlBuilder* b, VirtualStack* stack) {
   static_assert(std::is_integral<T>::value,
                 "EmitIntDivide only works on integral types");
 
-  EmitBinaryOp<T>(b, pc, stack, [&](TR::IlValue* dividend, TR::IlValue* divisor) {
+  EmitBinaryOp<T>(b, stack, [&](TR::IlValue* dividend, TR::IlValue* divisor) {
     EmitTrapIf(b,
     b->        EqualTo(divisor, b->Const(static_cast<T>(0))),
-    b->        Const(static_cast<Result_t>(interp::Result::TrapIntegerDivideByZero)),
-               pc);
+    b->        Const(static_cast<Result_t>(interp::Result::TrapIntegerDivideByZero)));
 
     EmitTrapIf(b,
     b->        And(
     b->            EqualTo(dividend, b->Const(std::numeric_limits<T>::min())),
     b->            EqualTo(divisor, b->Const(static_cast<T>(-1)))),
-    b->        Const(static_cast<Result_t>(interp::Result::TrapIntegerOverflow)),
-               pc);
+    b->        Const(static_cast<Result_t>(interp::Result::TrapIntegerOverflow)));
 
     return b->Div(dividend, divisor);
   });
 }
 
 template <typename T>
-void FunctionBuilder::EmitIntRemainder(TR::IlBuilder* b, const uint8_t* pc, VirtualStack* stack) {
+void FunctionBuilder::EmitIntRemainder(TR::IlBuilder* b, VirtualStack* stack) {
   static_assert(std::is_integral<T>::value,
                 "EmitIntRemainder only works on integral types");
 
-  EmitBinaryOp<T>(b, pc, stack, [&](TR::IlValue* dividend, TR::IlValue* divisor) {
+  EmitBinaryOp<T>(b, stack, [&](TR::IlValue* dividend, TR::IlValue* divisor) {
     EmitTrapIf(b,
     b->        EqualTo(divisor, b->Const(static_cast<T>(0))),
-    b->        Const(static_cast<Result_t>(interp::Result::TrapIntegerDivideByZero)),
-               pc);
+    b->        Const(static_cast<Result_t>(interp::Result::TrapIntegerDivideByZero)));
 
     TR::IlValue* return_value = b->Const(static_cast<T>(0));
 
@@ -433,34 +478,40 @@ TR::IlValue* FunctionBuilder::EmitMemoryPreAccess(TR::IlBuilder* b, const uint8_
 
   EmitTrapIf(b,
   b->        EqualTo(address, b->ConstAddress(nullptr)),
-  b->        Const(static_cast<Result_t>(interp::Result::TrapMemoryAccessOutOfBounds)),
-             *pc);
+  b->        Const(static_cast<Result_t>(interp::Result::TrapMemoryAccessOutOfBounds)));
 
   return address;
 }
 
-void FunctionBuilder::EmitTrap(TR::IlBuilder* b, TR::IlValue* result, const uint8_t* pc) {
-  if (pc != nullptr) {
-    b->StoreIndirect("ThreadInfo", "pc", b->Load("thread"), b->ConstInt32(pc - thread_->GetIstream()));
+void FunctionBuilder::EmitCommitPc(TR::IlBuilder* b) {
+  b->StoreIndirect("ThreadInfo", "pc", b->Load("thread"), b->Load("pc"));
+}
+
+void FunctionBuilder::EmitTrap(TR::IlBuilder* b, TR::IlValue* result, bool commit_pc) {
+  if (commit_pc) {
+    EmitCommitPc(b);
+
+    if (thread_->env_->JitOptions().hook_abilities.may_trace_trap)
+      b->Call("JitHookTrap", 2, b->Load("thread"), result);
   }
 
   b->Return(result);
 }
 
-void FunctionBuilder::EmitCheckTrap(TR::IlBuilder* b, TR::IlValue* result, const uint8_t* pc) {
+void FunctionBuilder::EmitCheckTrap(TR::IlBuilder* b, TR::IlValue* result, bool commit_pc) {
   TR::IlBuilder* trap_handler = nullptr;
 
   b->IfThen(&trap_handler,
   b->       NotEqualTo(result, b->Const(static_cast<Result_t>(interp::Result::Ok))));
 
-  EmitTrap(trap_handler, result, pc);
+  EmitTrap(trap_handler, result, commit_pc);
 }
 
-void FunctionBuilder::EmitTrapIf(TR::IlBuilder* b, TR::IlValue* condition, TR::IlValue* result, const uint8_t* pc) {
+void FunctionBuilder::EmitTrapIf(TR::IlBuilder* b, TR::IlValue* condition, TR::IlValue* result, bool commit_pc) {
   TR::IlBuilder* trap_handler = nullptr;
 
   b->IfThen(&trap_handler, condition);
-  EmitTrap(trap_handler, result, pc);
+  EmitTrap(trap_handler, result, commit_pc);
 }
 
 template <>
@@ -482,7 +533,7 @@ TR::IlValue* FunctionBuilder::EmitIsNan<double>(TR::IlBuilder* b, TR::IlValue* v
 }
 
 template <typename ToType, typename FromType>
-void FunctionBuilder::EmitTruncation(TR::IlBuilder* b, const uint8_t* pc, VirtualStack* stack) {
+void FunctionBuilder::EmitTruncation(TR::IlBuilder* b, VirtualStack* stack) {
   static_assert(std::is_floating_point<FromType>::value, "FromType in EmitTruncation call must be a floating point type");
   static_assert(std::is_integral<ToType>::value, "ToType in EmitTruncation call must be an integer type");
   static_assert(std::is_signed<ToType>::value, "ToType in EmitTruncation call must be signed");
@@ -492,8 +543,7 @@ void FunctionBuilder::EmitTruncation(TR::IlBuilder* b, const uint8_t* pc, Virtua
   // TRAP_IF is NaN
   EmitTrapIf(b,
              EmitIsNan<FromType>(b, value),
-  b->        Const(static_cast<Result_t>(interp::Result::TrapInvalidConversionToInteger)),
-             pc);
+  b->        Const(static_cast<Result_t>(interp::Result::TrapInvalidConversionToInteger)));
 
   // TRAP_UNLESS conversion is in range
   EmitTrapIf(b,
@@ -502,8 +552,7 @@ void FunctionBuilder::EmitTruncation(TR::IlBuilder* b, const uint8_t* pc, Virtua
   b->                    Const(static_cast<FromType>(std::numeric_limits<ToType>::lowest()))),
   b->           GreaterThan(value,
   b->                       Const(static_cast<FromType>(std::numeric_limits<ToType>::max())))),
-  b->        Const(static_cast<Result_t>(interp::Result::TrapIntegerOverflow)),
-             pc);
+  b->        Const(static_cast<Result_t>(interp::Result::TrapIntegerOverflow)));
 
   auto* target_type = toIlType<ToType>(b->typeDictionary());
 
@@ -524,7 +573,7 @@ void FunctionBuilder::EmitTruncation(TR::IlBuilder* b, const uint8_t* pc, Virtua
  * the target type.
  */
 template <typename ToType, typename FromType>
-void FunctionBuilder::EmitUnsignedTruncation(TR::IlBuilder* b, const uint8_t* pc, VirtualStack* stack) {
+void FunctionBuilder::EmitUnsignedTruncation(TR::IlBuilder* b, VirtualStack* stack) {
   static_assert(std::is_floating_point<FromType>::value, "FromType in EmitUnsignedTruncation call must be a floating point type");
   static_assert(std::is_integral<ToType>::value, "ToType in EmitUnsignedTruncation call must be an integer type");
   static_assert(std::is_unsigned<ToType>::value, "ToType in EmitUnsignedTruncation call must be unsigned");
@@ -534,8 +583,7 @@ void FunctionBuilder::EmitUnsignedTruncation(TR::IlBuilder* b, const uint8_t* pc
   // TRAP_IF is NaN
   EmitTrapIf(b,
              EmitIsNan<FromType>(b, value),
-  b->        Const(static_cast<Result_t>(interp::Result::TrapInvalidConversionToInteger)),
-             pc);
+  b->        Const(static_cast<Result_t>(interp::Result::TrapInvalidConversionToInteger)));
 
   // TRAP_UNLESS conversion is in range
   EmitTrapIf(b,
@@ -544,8 +592,7 @@ void FunctionBuilder::EmitUnsignedTruncation(TR::IlBuilder* b, const uint8_t* pc
   b->                    Const(static_cast<FromType>(std::numeric_limits<ToType>::lowest()))),
   b->           GreaterThan(value,
   b->                       Const(static_cast<FromType>(std::numeric_limits<ToType>::max())))),
-  b->        Const(static_cast<Result_t>(interp::Result::TrapIntegerOverflow)),
-             pc);
+  b->        Const(static_cast<Result_t>(interp::Result::TrapIntegerOverflow)));
 
   auto* target_type = toIlType<ToType>(b->typeDictionary());
   auto* new_value = b->UnsignedConvertTo(target_type, b->ConvertTo(Int64, value));
@@ -642,6 +689,13 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
                            const uint8_t* istream,
                            const uint8_t* pc,
                            VirtualStack& stack) {
+  b->Store("pc", b->ConstInt32(pc - istream));
+
+  if (thread_->env_->JitOptions().hook_abilities.may_trace_instr) {
+    EmitCommitPc(b);
+    b->Call("JitHookInstr", 1, b->Load("thread"));
+  }
+
   Opcode opcode = interp::ReadOpcode(&pc);
   TR_ASSERT(!opcode.IsInvalid(), "Invalid opcode");
 
@@ -681,13 +735,18 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
     // transformed into a BrUnless. So, there's no need to handle it.
 
     case Opcode::Return:
+      if (thread_->env_->JitOptions().hook_abilities.may_trace_return) {
+        EmitCommitPc(b);
+        b->Call("JitHookReturn", 1, b->Load("thread"));
+      }
+
       TearDownLocals(b);
-      MoveToPhysStack(b, pc, &stack, stack.Depth());
+      MoveToPhysStack(b, &stack, stack.Depth());
       b->Return(b->Const(static_cast<Result_t>(interp::Result::Ok)));
       return true;
 
     case Opcode::Unreachable:
-      EmitTrap(b, b->Const(static_cast<Result_t>(interp::Result::TrapUnreachable)), pc);
+      EmitTrap(b, b->Const(static_cast<Result_t>(interp::Result::TrapUnreachable)));
       return true;
 
     case Opcode::I32Const: {
@@ -781,7 +840,7 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
       auto* thread = b->Load("thread");
       auto* call_stack = b->LoadIndirect("ThreadInfo", "call_stack", thread);
 
-      MoveToPhysStack(b, pc, &stack, sig->param_types.size());
+      MoveToPhysStack(b, &stack, sig->param_types.size());
 
       auto* fn_thunk = b->LoadAt(typeDictionary()->pAddress,
                        b->       IndexAt(typeDictionary()->pAddress,
@@ -790,8 +849,7 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
 
       EmitTrapIf(b,
       b->        EqualTo(call_stack, b->LoadIndirect("ThreadInfo", "call_stack_max", thread)),
-      b->        Const(static_cast<Result_t>(interp::Result::TrapCallStackExhausted)),
-                 pc);
+      b->        Const(static_cast<Result_t>(interp::Result::TrapCallStackExhausted)));
 
       b->StoreIndirect("ThreadInfo", "call_stack", thread, b->IndexAt(typeDictionary()->pAddress, call_stack, b->ConstInt32(1)));
       b->StoreIndirect("CallFrame", "pc", call_stack, b->ConstInt32(pc - thread_->GetIstream()));
@@ -804,7 +862,7 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
                      b->             ConstInt32(fn_ind));
 
       // Don't pass the pc since a trap in a called function should not update the thread's pc
-      EmitCheckTrap(b, result, nullptr);
+      EmitCheckTrap(b, result, false);
 
       for (Type t : sig->result_types) {
         if (t == Type::V128)
@@ -823,15 +881,13 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
 
       auto* sig = thread_->env()->GetFuncSignature(sig_index);
 
-      auto* thread = b->Load("thread");
+      MoveToPhysStack(b, &stack, sig->param_types.size());
 
-      MoveToPhysStack(b, pc, &stack, sig->param_types.size());
-
-      b->StoreIndirect("ThreadInfo", "pc", thread, b->ConstInt32(pc - thread_->GetIstream()));
-      auto* result = b->Call("CallIndirectHelper", 4, thread, table_index, b->ConstInt32(sig_index), entry_index);
+      EmitCommitPc(b);
+      auto* result = b->Call("CallIndirectHelper", 4, b->Load("thread"), table_index, b->ConstInt32(sig_index), entry_index);
 
       // Don't pass the pc since a trap in a called function should not update the thread's pc
-      EmitCheckTrap(b, result, nullptr);
+      EmitCheckTrap(b, result, false);
 
       for (Type t : sig->result_types) {
         if (t == Type::V128)
@@ -1001,69 +1057,69 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
     }
 
     case Opcode::I32Add:
-      EmitBinaryOp<int32_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->Add(lhs, rhs);
       });
       break;
 
     case Opcode::I32Sub:
-      EmitBinaryOp<int32_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->Sub(lhs, rhs);
       });
       break;
 
     case Opcode::I32Mul:
-      EmitBinaryOp<int32_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->Mul(lhs, rhs);
       });
       break;
 
     case Opcode::I32DivS:
-      EmitIntDivide<int32_t>(b, pc, &stack);
+      EmitIntDivide<int32_t>(b, &stack);
       break;
 
     case Opcode::I32RemS:
-      EmitIntRemainder<int32_t>(b, pc, &stack);
+      EmitIntRemainder<int32_t>(b, &stack);
       break;
 
     case Opcode::I32And:
-      EmitBinaryOp<int32_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->And(lhs, rhs);
       });
       break;
 
     case Opcode::I32Or:
-      EmitBinaryOp<int32_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->Or(lhs, rhs);
       });
       break;
 
     case Opcode::I32Xor:
-      EmitBinaryOp<int32_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->Xor(lhs, rhs);
       });
       break;
 
     case Opcode::I32Shl:
-      EmitBinaryOp<int32_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->ShiftL(lhs, CalculateShiftAmount<int32_t>(b, rhs));
       });
       break;
 
     case Opcode::I32ShrS:
-      EmitBinaryOp<int32_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->ShiftR(lhs, CalculateShiftAmount<int32_t>(b, rhs));
       });
       break;
 
     case Opcode::I32ShrU:
-      EmitBinaryOp<int32_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->UnsignedShiftR(lhs, CalculateShiftAmount<int32_t>(b, rhs));
       });
       break;
 
     case Opcode::I32Rotl:
-      EmitBinaryOp<int32_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         auto* amount = CalculateShiftAmount<int32_t>(b, rhs);
 
         return b->Or(
@@ -1073,7 +1129,7 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
       break;
 
     case Opcode::I32Rotr:
-      EmitBinaryOp<int32_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         auto* amount = CalculateShiftAmount<int32_t>(b, rhs);
 
         return b->Or(
@@ -1083,135 +1139,135 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
       break;
 
     case Opcode::I32Eqz:
-      EmitUnaryOp<int32_t, int>(b, pc, &stack, [&](TR::IlValue* val) {
+      EmitUnaryOp<int32_t, int>(b, &stack, [&](TR::IlValue* val) {
         return b->EqualTo(val, b->ConstInt32(0));
       });
       break;
 
     case Opcode::I32Eq:
-      EmitBinaryOp<int32_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->EqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::I32Ne:
-      EmitBinaryOp<int32_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->NotEqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::I32LtS:
-      EmitBinaryOp<int32_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->LessThan(lhs, rhs);
       });
       break;
 
     case Opcode::I32LtU:
-      EmitBinaryOp<int32_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->UnsignedLessThan(lhs, rhs);
       });
       break;
 
     case Opcode::I32GtS:
-      EmitBinaryOp<int32_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->GreaterThan(lhs, rhs);
       });
       break;
 
     case Opcode::I32GtU:
-      EmitBinaryOp<int32_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->UnsignedGreaterThan(lhs, rhs);
       });
       break;
 
     case Opcode::I32LeS:
-      EmitBinaryOp<int32_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->LessOrEqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::I32LeU:
-      EmitBinaryOp<int32_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->UnsignedLessOrEqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::I32GeS:
-      EmitBinaryOp<int32_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->GreaterOrEqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::I32GeU:
-      EmitBinaryOp<int32_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int32_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->UnsignedGreaterOrEqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::I64Add:
-        EmitBinaryOp<int64_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+        EmitBinaryOp<int64_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
           return b->Add(lhs, rhs);
         });
         break;
 
     case Opcode::I64Sub:
-      EmitBinaryOp<int64_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->Sub(lhs, rhs);
       });
       break;
 
     case Opcode::I64Mul:
-      EmitBinaryOp<int64_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->Mul(lhs, rhs);
       });
       break;
 
     case Opcode::I64DivS:
-      EmitIntDivide<int64_t>(b, pc, &stack);
+      EmitIntDivide<int64_t>(b, &stack);
       break;
 
     case Opcode::I64RemS:
-      EmitIntRemainder<int64_t>(b, pc, &stack);
+      EmitIntRemainder<int64_t>(b, &stack);
       break;
 
     case Opcode::I64And:
-      EmitBinaryOp<int64_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->And(lhs, rhs);
       });
       break;
 
     case Opcode::I64Or:
-      EmitBinaryOp<int64_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->Or(lhs, rhs);
       });
       break;
 
     case Opcode::I64Xor:
-      EmitBinaryOp<int64_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->Xor(lhs, rhs);
       });
       break;
 
     case Opcode::I64Shl:
-      EmitBinaryOp<int64_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->ShiftL(lhs, CalculateShiftAmount<int64_t>(b, rhs));
       });
       break;
 
     case Opcode::I64ShrS:
-      EmitBinaryOp<int64_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->ShiftR(lhs, CalculateShiftAmount<int64_t>(b, rhs));
       });
       break;
 
     case Opcode::I64ShrU:
-      EmitBinaryOp<int64_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->UnsignedShiftR(lhs, CalculateShiftAmount<int64_t>(b, rhs));
       });
       break;
 
     case Opcode::I64Rotl:
-      EmitBinaryOp<int64_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         auto* amount = CalculateShiftAmount<int64_t>(b, rhs);
 
         return b->Or(
@@ -1221,7 +1277,7 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
       break;
 
     case Opcode::I64Rotr:
-      EmitBinaryOp<int64_t>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         auto* amount = CalculateShiftAmount<int64_t>(b, rhs);
 
         return b->Or(
@@ -1231,73 +1287,73 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
       break;
 
     case Opcode::I64Eqz:
-      EmitUnaryOp<int64_t, int>(b, pc, &stack, [&](TR::IlValue* val) {
+      EmitUnaryOp<int64_t, int>(b, &stack, [&](TR::IlValue* val) {
         return b->EqualTo(val, b->ConstInt64(0));
       });
       break;
 
     case Opcode::I64Eq:
-      EmitBinaryOp<int64_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->EqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::I64Ne:
-      EmitBinaryOp<int64_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->NotEqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::I64LtS:
-      EmitBinaryOp<int64_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->LessThan(lhs, rhs);
       });
       break;
 
     case Opcode::I64LtU:
-      EmitBinaryOp<int64_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->UnsignedLessThan(lhs, rhs);
       });
       break;
 
     case Opcode::I64GtS:
-      EmitBinaryOp<int64_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->GreaterThan(lhs, rhs);
       });
       break;
 
     case Opcode::I64GtU:
-      EmitBinaryOp<int64_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->UnsignedGreaterThan(lhs, rhs);
       });
       break;
 
     case Opcode::I64LeS:
-      EmitBinaryOp<int64_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->LessOrEqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::I64LeU:
-      EmitBinaryOp<int64_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->UnsignedLessOrEqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::I64GeS:
-      EmitBinaryOp<int64_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->GreaterOrEqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::I64GeU:
-      EmitBinaryOp<int64_t, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<int64_t, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->UnsignedGreaterOrEqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::F32Abs:
-      EmitUnaryOp<float>(b, pc, &stack, [&](TR::IlValue* value) {
+      EmitUnaryOp<float>(b, &stack, [&](TR::IlValue* value) {
         return b->ConvertBitsTo(Float,
         b->                     And(
         b->                         ConvertBitsTo(Int32, value),
@@ -1306,43 +1362,43 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
       break;
 
     case Opcode::F32Neg:
-      EmitUnaryOp<float>(b, pc, &stack, [&](TR::IlValue* value) {
+      EmitUnaryOp<float>(b, &stack, [&](TR::IlValue* value) {
         return b->Mul(value, b->ConstFloat(-1));
       });
       break;
 
     case Opcode::F32Sqrt:
-      EmitUnaryOp<float>(b, pc, &stack, [&](TR::IlValue* value) {
+      EmitUnaryOp<float>(b, &stack, [&](TR::IlValue* value) {
         return b->Call("f32_sqrt", 1, value);
       });
       break;
 
     case Opcode::F32Add:
-      EmitBinaryOp<float>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<float>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->Add(lhs, rhs);
       });
       break;
 
     case Opcode::F32Sub:
-      EmitBinaryOp<float>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<float>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->Sub(lhs, rhs);
       });
       break;
 
     case Opcode::F32Mul:
-      EmitBinaryOp<float>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<float>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->Mul(lhs, rhs);
       });
       break;
 
     case Opcode::F32Div:
-      EmitBinaryOp<float>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<float>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->Div(lhs, rhs);
       });
       break;
 
     case Opcode::F32Copysign:
-      EmitBinaryOp<float>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<float>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->ConvertBitsTo(Float,
         b->                     Or(
         b->                        And(
@@ -1355,43 +1411,43 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
       break;
 
     case Opcode::F32Eq:
-      EmitBinaryOp<float, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<float, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->EqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::F32Ne:
-      EmitBinaryOp<float, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<float, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->NotEqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::F32Lt:
-      EmitBinaryOp<float, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<float, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->LessThan(lhs, rhs);
       });
       break;
 
     case Opcode::F32Le:
-      EmitBinaryOp<float, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<float, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->LessOrEqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::F32Gt:
-      EmitBinaryOp<float, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<float, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->GreaterThan(lhs, rhs);
       });
       break;
 
     case Opcode::F32Ge:
-      EmitBinaryOp<float, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<float, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->GreaterOrEqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::F32Min:
-      EmitBinaryOp<float>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<float>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         auto* result = b->ConstFloat(0.0f);
 
         TR::IlBuilder* eq_path = nullptr;
@@ -1422,7 +1478,7 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
       break;
 
     case Opcode::F32Max:
-      EmitBinaryOp<float>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<float>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         auto* result = b->ConstFloat(0.0f);
 
         TR::IlBuilder* eq_path = nullptr;
@@ -1453,7 +1509,7 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
       break;
 
     case Opcode::F64Abs:
-      EmitUnaryOp<double>(b, pc, &stack, [&](TR::IlValue* value) {
+      EmitUnaryOp<double>(b, &stack, [&](TR::IlValue* value) {
         return b->ConvertBitsTo(Double,
         b->                     And(
         b->                         ConvertBitsTo(Int64, value),
@@ -1462,43 +1518,43 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
       break;
 
     case Opcode::F64Neg:
-      EmitUnaryOp<double>(b, pc, &stack, [&](TR::IlValue* value) {
+      EmitUnaryOp<double>(b, &stack, [&](TR::IlValue* value) {
         return b->Mul(value, b->ConstDouble(-1));
       });
       break;
 
     case Opcode::F64Sqrt:
-      EmitUnaryOp<double>(b, pc, &stack, [&](TR::IlValue* value) {
+      EmitUnaryOp<double>(b, &stack, [&](TR::IlValue* value) {
         return b->Call("f64_sqrt", 1, value);
       });
       break;
 
     case Opcode::F64Add:
-      EmitBinaryOp<double>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<double>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->Add(lhs, rhs);
       });
       break;
 
     case Opcode::F64Sub:
-      EmitBinaryOp<double>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<double>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->Sub(lhs, rhs);
       });
       break;
 
     case Opcode::F64Mul:
-      EmitBinaryOp<double>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<double>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->Mul(lhs, rhs);
       });
       break;
 
     case Opcode::F64Div:
-      EmitBinaryOp<double>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<double>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->Div(lhs, rhs);
       });
       break;
 
     case Opcode::F64Copysign:
-      EmitBinaryOp<double>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<double>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->ConvertBitsTo(Double,
         b->                     Or(
         b->                        And(
@@ -1511,43 +1567,43 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
       break;
 
     case Opcode::F64Eq:
-      EmitBinaryOp<double, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<double, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->EqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::F64Ne:
-      EmitBinaryOp<double, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<double, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->NotEqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::F64Lt:
-      EmitBinaryOp<double, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<double, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->LessThan(lhs, rhs);
       });
       break;
 
     case Opcode::F64Le:
-      EmitBinaryOp<double, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<double, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->LessOrEqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::F64Gt:
-      EmitBinaryOp<double, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<double, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->GreaterThan(lhs, rhs);
       });
       break;
 
     case Opcode::F64Ge:
-      EmitBinaryOp<double, int>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<double, int>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         return b->GreaterOrEqualTo(lhs, rhs);
       });
       break;
 
     case Opcode::F64Min:
-      EmitBinaryOp<double>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<double>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         auto* result = b->ConstDouble(0.0f);
 
         TR::IlBuilder* eq_path = nullptr;
@@ -1578,7 +1634,7 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
       break;
 
     case Opcode::F64Max:
-      EmitBinaryOp<double>(b, pc, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
+      EmitBinaryOp<double>(b, &stack, [&](TR::IlValue* lhs, TR::IlValue* rhs) {
         auto* result = b->ConstDouble(0.0);
 
         TR::IlBuilder* eq_path = nullptr;
@@ -1719,37 +1775,37 @@ bool FunctionBuilder::Emit(TR::BytecodeBuilder* b,
     }
 
     case Opcode::I32TruncF32S:
-      EmitTruncation<int32_t, float>(b, pc, &stack);
+      EmitTruncation<int32_t, float>(b, &stack);
       break;
 
     case Opcode::I32TruncF32U:
-      EmitUnsignedTruncation<uint32_t, float>(b, pc, &stack);
+      EmitUnsignedTruncation<uint32_t, float>(b, &stack);
       break;
 
     case Opcode::I32TruncF64S:
-      EmitTruncation<int32_t, double>(b, pc, &stack);
+      EmitTruncation<int32_t, double>(b, &stack);
       break;
 
     case Opcode::I32TruncF64U:
-      EmitUnsignedTruncation<uint32_t, double>(b, pc, &stack);
+      EmitUnsignedTruncation<uint32_t, double>(b, &stack);
       break;
 
     case Opcode::I64TruncF32S:
-      EmitTruncation<int64_t, float>(b, pc, &stack);
+      EmitTruncation<int64_t, float>(b, &stack);
       break;
 
 //    UNSIGNED TYPE NOT HANDLED
 //    case Opcode::I64TruncF32U:
-//      EmitTruncation<uint64_t, float>(b, pc, &stack);
+//      EmitTruncation<uint64_t, float>(b, &stack);
 //      break;
 
     case Opcode::I64TruncF64S:
-      EmitTruncation<int64_t, double>(b, pc, &stack);
+      EmitTruncation<int64_t, double>(b, &stack);
       break;
 
 //    UNSIGNED TYPE NOT HANDLED
 //    case Opcode::I64TruncF64U:
-//      EmitTruncation<uint64_t, double>(b, pc, &stack);
+//      EmitTruncation<uint64_t, double>(b, &stack);
 //      break;
 
     case Opcode::I32TruncSatF32S:

@@ -8,13 +8,19 @@ namespace wabt {
 namespace jit {
 
 Result_t InterpThunk(ThreadInfo* th, Index ind) {
+  interp::Result result;
   auto* env = th->thread->env();
   auto* func = cast<interp::DefinedFunc>(env->GetFunc(ind));
 
   th->pc = func->offset;
   th->thread->set_pc(func->offset);
   th->thread->call_stack_top_ = th->call_stack - th->thread->call_stack_.data();
-  CHECK_TRAP_HELPER(env->TryJit(th->thread, func, ind));
+
+  result = env->TryJit(th->thread, func, ind);
+  if (result != interp::Result::Ok) {
+    JitHookTrap(th, static_cast<Result_t>(result));
+    return static_cast<Result_t>(result);
+  }
 
   if (func->jit_fn_) {
     return func->jit_fn_(th, ind);
@@ -24,7 +30,10 @@ Result_t InterpThunk(ThreadInfo* th, Index ind) {
     auto last_jit_frame = th->thread->last_jit_frame_;
     th->thread->last_jit_frame_ = th->thread->call_stack_top_;
 
-    interp::Result result = interp::Result::Ok;
+    if (th->thread->ThreadHooks().on_call)
+      th->thread->ThreadHooks().on_call(th->thread);
+
+    result = interp::Result::Ok;
     while (result == wabt::interp::Result::Ok) {
       result = th->thread->Run(1000);
     }
@@ -50,6 +59,9 @@ Result_t HostCallThunk(ThreadInfo* th, Index ind) {
   auto result = th->thread->CallHost(func);
 
   th->jit_fn_table = th->thread->env()->jit_funcs_.data();
+
+  if (result != interp::Result::Ok)
+    JitHookTrap(th, static_cast<Result_t>(result));
 
   return static_cast<Result_t>(result);
 }

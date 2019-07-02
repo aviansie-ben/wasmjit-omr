@@ -24,7 +24,7 @@ namespace jit {
 
 unsigned short JitEnvironment::instance_count_ = 0;
 
-JitEnvironment::JitEnvironment() {
+JitEnvironment::JitEnvironment(Options options) : options_(options) {
   if (instance_count_ == 0)
      initializeJit();
   ++instance_count_;
