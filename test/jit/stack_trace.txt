@@ -90,60 +90,60 @@
 )
 (;; STDOUT ;;;
 test_interp2interp_direct() => error: unreachable executed
-  at $interp_crash + 0x10
+  at $interp_crash + 0xc
   at test_interp2interp_direct + 0x8
 test_interp2jit_direct() => error: unreachable executed
-  at $jit_crash + 0x4
+  at $jit_crash
 [Interpreter to JIT transition]
   at test_interp2jit_direct + 0x8
 test_jit2interp_direct() => error: unreachable executed
-  at $interp_crash + 0x10
+  at $interp_crash + 0xc
 [JIT to interpreter transition]
   at $jit2interp_direct + 0x8
 [Interpreter to JIT transition]
   at test_jit2interp_direct + 0x8
 test_jit2jit_direct() => error: unreachable executed
-  at $jit_crash + 0x4
+  at $jit_crash
   at $jit2jit_direct + 0x8
 [Interpreter to JIT transition]
   at test_jit2jit_direct + 0x8
 test_interp2interp_indirect() => error: unreachable executed
-  at $interp_crash + 0x10
+  at $interp_crash + 0xc
   at test_interp2interp_indirect + 0x14
 test_interp2jit_indirect() => error: unreachable executed
-  at $jit_crash + 0x4
+  at $jit_crash
 [Interpreter to JIT transition]
   at test_interp2jit_indirect + 0x14
 test_jit2interp_indirect() => error: unreachable executed
-  at $interp_crash + 0x10
+  at $interp_crash + 0xc
 [JIT to interpreter transition]
   at $jit2interp_indirect + 0x14
 [Interpreter to JIT transition]
   at test_jit2interp_indirect + 0x8
 test_jit2jit_indirect() => error: unreachable executed
-  at $jit_crash + 0x4
+  at $jit_crash
   at $jit2jit_indirect + 0x14
 [Interpreter to JIT transition]
   at test_jit2jit_indirect + 0x8
 test_interp_indirect_fail() => error: undefined table index
-  at test_interp_indirect_fail + 0x14
+  at test_interp_indirect_fail + 0x8
 test_jit_indirect_fail() => error: undefined table index
-  at $jit_indirect_fail + 0x14
+  at $jit_indirect_fail + 0x8
 [Interpreter to JIT transition]
   at test_jit_indirect_fail + 0x8
 test_interp2interp_after_interp2jit_direct() => error: unreachable executed
-  at $interp_crash + 0x10
+  at $interp_crash + 0xc
   at test_interp2interp_after_interp2jit_direct + 0x10
 test_jit2jit_after_jit2interp_direct() => error: unreachable executed
-  at $jit_crash + 0x4
+  at $jit_crash
   at $jit2jit_after_jit2interp_direct + 0x10
 [Interpreter to JIT transition]
   at test_jit2jit_after_jit2interp_direct + 0x8
 test_interp2interp_after_interp2jit_indirect() => error: unreachable executed
-  at $interp_crash + 0x10
+  at $interp_crash + 0xc
   at test_interp2interp_after_interp2jit_indirect + 0x28
 test_jit2jit_after_jit2interp_indirect() => error: unreachable executed
-  at $jit_crash + 0x4
+  at $jit_crash
   at $jit2jit_after_jit2interp_indirect + 0x28
 [Interpreter to JIT transition]
   at test_jit2jit_after_jit2interp_indirect + 0x8
