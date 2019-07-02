@@ -19,6 +19,7 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
+#include <iostream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -51,6 +52,7 @@ static bool s_trap_on_failed_comp;
 static bool s_no_stack_trace;
 static uint32_t s_jit_threshold = 1;
 static Features s_features;
+static jit::HookAbilities s_hook_abilities;
 
 static std::unique_ptr<FileStream> s_log_stream;
 static std::unique_ptr<FileStream> s_stdout_stream;
@@ -78,6 +80,19 @@ examples:
   # value stack size to 100 elements
   $ wasm-interp test.wasm -V 100 --run-all-exports
 )";
+
+static void PrintPc(Thread* thread) {
+  DefinedFunc* best_fn = thread->env()->FindFunc(thread->pc());
+
+  if (best_fn) {
+    std::cout << best_fn->dbg_name_;
+    if (thread->pc() != best_fn->offset) {
+      std::cout << " + 0x" << std::hex << (thread->pc() - best_fn->offset);
+    }
+  } else {
+    std::cout << "@" << thread->pc();
+  }
+}
 
 static void ParseOptions(int argc, char** argv) {
   OptionParser parser("wasm-interp", s_description);
@@ -125,6 +140,38 @@ static void ParseOptions(int argc, char** argv) {
   parser.AddOption("no-stack-trace",
                    "Don't print a stack trace if a trap occurs",
                    []() { s_no_stack_trace = true; });
+
+  parser.AddOption(
+      "test-hooks", "",
+      []() {
+        s_hook_abilities.may_trace_call = true;
+        s_thread_options.hooks.on_call = [&](Thread* thread) {
+          std::cout << "CALL   ";
+          PrintPc(thread);
+          std::cout << "\n";
+        };
+
+        s_hook_abilities.may_trace_return = true;
+        s_thread_options.hooks.on_return = [&](Thread* thread) {
+          std::cout << "RETURN ";
+          PrintPc(thread);
+          std::cout << "\n";
+        };
+
+        s_hook_abilities.may_trace_instr = true;
+        s_thread_options.hooks.on_instr = [&](Thread* thread) {
+          std::cout << "INSTR  ";
+          PrintPc(thread);
+          std::cout << "\n";
+        };
+
+        s_hook_abilities.may_trace_trap = true;
+        s_thread_options.hooks.on_trap = [&](Thread* thread, interp::Result result) {
+          std::cout << "TRAP   ";
+          PrintPc(thread);
+          std::cout << "\n";
+        };
+      });
 
   parser.AddArgument("filename", OptionParser::ArgumentCount::One,
                      [](const char* argument) { s_infile = argument; });
@@ -217,6 +264,7 @@ static wabt::jit::Options CreateJitOptions() {
     options.trap_on_failed_comp = true;
 
   options.jit_threshold = s_jit_threshold;
+  options.hook_abilities = s_hook_abilities;
 
   return options;
 }

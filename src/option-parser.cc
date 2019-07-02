@@ -284,6 +284,10 @@ void OptionParser::PrintHelp() {
   const size_t kExtraSpace = 8;
   size_t longest_name_length = 0;
   for (const Option& option : options_) {
+    if (option.help.empty()) {
+      continue;
+    }
+
     size_t length;
     if (!option.long_name.empty()) {
       length = option.long_name.size();
@@ -301,6 +305,10 @@ void OptionParser::PrintHelp() {
   }
 
   for (const Option& option : options_) {
+    if (option.help.empty()) {
+      continue;
+    }
+
     if (!option.short_name && option.long_name.empty()) {
       continue;
     }

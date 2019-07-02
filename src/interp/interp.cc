@@ -399,6 +399,23 @@ HostModule* Environment::AppendHostModule(string_view name) {
   return module;
 }
 
+DefinedFunc* Environment::FindFunc(IstreamOffset off) {
+  DefinedFunc* best_fn = nullptr;
+
+  for (auto& fn : funcs_) {
+    if (fn->is_host) continue;
+
+    DefinedFunc* dfn = cast<DefinedFunc>(fn.get());
+
+    if (dfn->offset > off) continue;
+    if (best_fn && best_fn->offset > dfn->offset) continue;
+
+    best_fn = dfn;
+  }
+
+  return best_fn;
+}
+
 uint32_t ToRep(bool x) { return x ? 1 : 0; }
 uint32_t ToRep(uint32_t x) { return x; }
 uint64_t ToRep(uint64_t x) { return x; }
@@ -3588,20 +3605,7 @@ exit_loop:
 }
 
 static void PrintCallFrame(Stream* s, Environment* e, const CallFrame* frame) {
-  DefinedFunc* best_fn = nullptr;
-
-  for (Index i = 0; i < e->GetFuncCount(); i++) {
-    Func* fn = e->GetFunc(i);
-
-    if (fn->is_host) continue;
-
-    DefinedFunc* dfn = cast<DefinedFunc>(fn);
-
-    if (dfn->offset > frame->pc) continue;
-    if (best_fn && best_fn->offset > dfn->offset) continue;
-
-    best_fn = dfn;
-  }
+  DefinedFunc* best_fn = e->FindFunc(frame->pc);
 
   if (best_fn) {
     s->Writef("  at %s", best_fn->dbg_name_.c_str());

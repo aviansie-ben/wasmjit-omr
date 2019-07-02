@@ -556,6 +556,8 @@ class Environment {
   MarkPoint Mark();
   void ResetToMarkPoint(const MarkPoint&);
 
+  DefinedFunc* FindFunc(IstreamOffset off);
+
   void Disassemble(Stream* stream, IstreamOffset from, IstreamOffset to);
   void DisassembleModule(Stream* stream, Module*);
 
