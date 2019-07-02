@@ -1,0 +1,297 @@
+;;; TOOL: run-interp-minimal
+;;; ARGS0: --debug-names
+;;; ARGS1: --test-hooks --no-stack-trace
+(module
+  (memory 0)
+  (table anyfunc (elem $jit_crash $interp_crash $jit_nop $interp_nop))
+
+  (func $jit_crash
+    unreachable)
+  (func $interp_crash
+    memory.size
+    drop
+    unreachable)
+
+  (func $jit_nop)
+  (func $interp_nop
+    memory.size
+    drop)
+
+  (func (export "test_i2i_direct_trap")
+    call $interp_crash)
+
+  (func (export "test_i2j_direct_trap")
+    call $jit_crash)
+
+  (func $j2i_direct_trap
+    call $interp_crash)
+  (func (export "test_j2i_direct_trap")
+    call $j2i_direct_trap)
+
+  (func $j2j_direct_trap
+    call $jit_crash)
+  (func (export "test_j2j_direct_trap")
+    call $j2j_direct_trap)
+
+  (func (export "test_i2i_indirect_trap")
+    i32.const 1
+    call_indirect)
+
+  (func (export "test_i2j_indirect_trap")
+    i32.const 0
+    call_indirect)
+
+  (func $j2i_indirect_trap
+    i32.const 1
+    call_indirect)
+  (func (export "test_j2i_indirect_trap")
+    call $j2i_indirect_trap)
+
+  (func $j2j_indirect_trap
+    i32.const 0
+    call_indirect)
+  (func (export "test_j2j_indirect_trap")
+    call $j2j_indirect_trap)
+
+  (func (export "test_i2i_direct_nop")
+    call $interp_nop)
+
+  (func (export "test_i2j_direct_nop")
+    call $jit_nop)
+
+  (func $j2i_direct_nop
+    call $interp_nop)
+  (func (export "test_j2i_direct_nop")
+    call $j2i_direct_nop)
+
+  (func $j2j_direct_nop
+    call $jit_nop)
+  (func (export "test_j2j_direct_nop")
+    call $j2j_direct_nop)
+
+  (func (export "test_i2i_indirect_nop")
+    i32.const 3
+    call_indirect)
+
+  (func (export "test_i2j_indirect_nop")
+    i32.const 2
+    call_indirect)
+
+  (func $j2i_indirect_nop
+    i32.const 3
+    call_indirect)
+  (func (export "test_j2i_indirect_nop")
+    call $j2i_indirect_nop)
+
+  (func $j2j_indirect_nop
+    i32.const 2
+    call_indirect)
+  (func (export "test_j2j_indirect_nop")
+    call $j2j_indirect_nop)
+
+  (func (export "test_interp_indirect_fail")
+    i32.const 4
+    call_indirect)
+
+  (func $jit_indirect_fail
+    i32.const 4
+    call_indirect)
+  (func (export "test_jit_indirect_fail")
+    call $jit_indirect_fail)
+
+  (func (export "test_interp_locals") (local i32 i32))
+
+  (func $jit_locals (local i32 i32))
+  (func (export "test_jit_locals")
+    call $jit_locals)
+)
+(;; STDOUT ;;;
+CALL   test_i2i_direct_trap
+INSTR  test_i2i_direct_trap
+CALL   $interp_crash
+INSTR  $interp_crash
+INSTR  $interp_crash + 0x8
+INSTR  $interp_crash + 0xc
+TRAP   $interp_crash + 0xc
+test_i2i_direct_trap() => error: unreachable executed
+CALL   test_i2j_direct_trap
+INSTR  test_i2j_direct_trap
+CALL   $jit_crash
+INSTR  $jit_crash
+TRAP   $jit_crash
+test_i2j_direct_trap() => error: unreachable executed
+CALL   test_j2i_direct_trap
+INSTR  test_j2i_direct_trap
+CALL   $j2i_direct_trap
+INSTR  $j2i_direct_trap
+CALL   $interp_crash
+INSTR  $interp_crash
+INSTR  $interp_crash + 0x8
+INSTR  $interp_crash + 0xc
+TRAP   $interp_crash + 0xc
+test_j2i_direct_trap() => error: unreachable executed
+CALL   test_j2j_direct_trap
+INSTR  test_j2j_direct_trap
+CALL   $j2j_direct_trap
+INSTR  $j2j_direct_trap
+CALL   $jit_crash
+INSTR  $jit_crash
+TRAP   $jit_crash
+test_j2j_direct_trap() => error: unreachable executed
+CALL   test_i2i_indirect_trap
+INSTR  test_i2i_indirect_trap
+INSTR  test_i2i_indirect_trap + 0x8
+CALL   $interp_crash
+INSTR  $interp_crash
+INSTR  $interp_crash + 0x8
+INSTR  $interp_crash + 0xc
+TRAP   $interp_crash + 0xc
+test_i2i_indirect_trap() => error: unreachable executed
+CALL   test_i2j_indirect_trap
+INSTR  test_i2j_indirect_trap
+INSTR  test_i2j_indirect_trap + 0x8
+CALL   $jit_crash
+INSTR  $jit_crash
+TRAP   $jit_crash
+test_i2j_indirect_trap() => error: unreachable executed
+CALL   test_j2i_indirect_trap
+INSTR  test_j2i_indirect_trap
+CALL   $j2i_indirect_trap
+INSTR  $j2i_indirect_trap
+INSTR  $j2i_indirect_trap + 0x8
+CALL   $interp_crash
+INSTR  $interp_crash
+INSTR  $interp_crash + 0x8
+INSTR  $interp_crash + 0xc
+TRAP   $interp_crash + 0xc
+test_j2i_indirect_trap() => error: unreachable executed
+CALL   test_j2j_indirect_trap
+INSTR  test_j2j_indirect_trap
+CALL   $j2j_indirect_trap
+INSTR  $j2j_indirect_trap
+INSTR  $j2j_indirect_trap + 0x8
+CALL   $jit_crash
+INSTR  $jit_crash
+TRAP   $jit_crash
+test_j2j_indirect_trap() => error: unreachable executed
+CALL   test_i2i_direct_nop
+INSTR  test_i2i_direct_nop
+CALL   $interp_nop
+INSTR  $interp_nop
+INSTR  $interp_nop + 0x8
+INSTR  $interp_nop + 0xc
+RETURN $interp_nop + 0xc
+INSTR  test_i2i_direct_nop + 0x8
+RETURN test_i2i_direct_nop + 0x8
+test_i2i_direct_nop() =>
+CALL   test_i2j_direct_nop
+INSTR  test_i2j_direct_nop
+CALL   $jit_nop
+INSTR  $jit_nop
+RETURN $jit_nop
+INSTR  test_i2j_direct_nop + 0x8
+RETURN test_i2j_direct_nop + 0x8
+test_i2j_direct_nop() =>
+CALL   test_j2i_direct_nop
+INSTR  test_j2i_direct_nop
+CALL   $j2i_direct_nop
+INSTR  $j2i_direct_nop
+CALL   $interp_nop
+INSTR  $interp_nop
+INSTR  $interp_nop + 0x8
+INSTR  $interp_nop + 0xc
+RETURN $interp_nop + 0xc
+INSTR  $j2i_direct_nop + 0x8
+RETURN $j2i_direct_nop + 0x8
+INSTR  test_j2i_direct_nop + 0x8
+RETURN test_j2i_direct_nop + 0x8
+test_j2i_direct_nop() =>
+CALL   test_j2j_direct_nop
+INSTR  test_j2j_direct_nop
+CALL   $j2j_direct_nop
+INSTR  $j2j_direct_nop
+CALL   $jit_nop
+INSTR  $jit_nop
+RETURN $jit_nop
+INSTR  $j2j_direct_nop + 0x8
+RETURN $j2j_direct_nop + 0x8
+INSTR  test_j2j_direct_nop + 0x8
+RETURN test_j2j_direct_nop + 0x8
+test_j2j_direct_nop() =>
+CALL   test_i2i_indirect_nop
+INSTR  test_i2i_indirect_nop
+INSTR  test_i2i_indirect_nop + 0x8
+CALL   $interp_nop
+INSTR  $interp_nop
+INSTR  $interp_nop + 0x8
+INSTR  $interp_nop + 0xc
+RETURN $interp_nop + 0xc
+INSTR  test_i2i_indirect_nop + 0x14
+RETURN test_i2i_indirect_nop + 0x14
+test_i2i_indirect_nop() =>
+CALL   test_i2j_indirect_nop
+INSTR  test_i2j_indirect_nop
+INSTR  test_i2j_indirect_nop + 0x8
+CALL   $jit_nop
+INSTR  $jit_nop
+RETURN $jit_nop
+INSTR  test_i2j_indirect_nop + 0x14
+RETURN test_i2j_indirect_nop + 0x14
+test_i2j_indirect_nop() =>
+CALL   test_j2i_indirect_nop
+INSTR  test_j2i_indirect_nop
+CALL   $j2i_indirect_nop
+INSTR  $j2i_indirect_nop
+INSTR  $j2i_indirect_nop + 0x8
+CALL   $interp_nop
+INSTR  $interp_nop
+INSTR  $interp_nop + 0x8
+INSTR  $interp_nop + 0xc
+RETURN $interp_nop + 0xc
+INSTR  $j2i_indirect_nop + 0x14
+RETURN $j2i_indirect_nop + 0x14
+INSTR  test_j2i_indirect_nop + 0x8
+RETURN test_j2i_indirect_nop + 0x8
+test_j2i_indirect_nop() =>
+CALL   test_j2j_indirect_nop
+INSTR  test_j2j_indirect_nop
+CALL   $j2j_indirect_nop
+INSTR  $j2j_indirect_nop
+INSTR  $j2j_indirect_nop + 0x8
+CALL   $jit_nop
+INSTR  $jit_nop
+RETURN $jit_nop
+INSTR  $j2j_indirect_nop + 0x14
+RETURN $j2j_indirect_nop + 0x14
+INSTR  test_j2j_indirect_nop + 0x8
+RETURN test_j2j_indirect_nop + 0x8
+test_j2j_indirect_nop() =>
+CALL   test_interp_indirect_fail
+INSTR  test_interp_indirect_fail
+INSTR  test_interp_indirect_fail + 0x8
+TRAP   test_interp_indirect_fail + 0x8
+test_interp_indirect_fail() => error: undefined table index
+CALL   test_jit_indirect_fail
+INSTR  test_jit_indirect_fail
+CALL   $jit_indirect_fail
+INSTR  $jit_indirect_fail
+INSTR  $jit_indirect_fail + 0x8
+TRAP   $jit_indirect_fail + 0x8
+test_jit_indirect_fail() => error: undefined table index
+CALL   test_interp_locals
+INSTR  test_interp_locals
+INSTR  test_interp_locals + 0x8
+INSTR  test_interp_locals + 0x14
+RETURN test_interp_locals + 0x14
+test_interp_locals() =>
+CALL   test_jit_locals
+INSTR  test_jit_locals
+CALL   $jit_locals
+INSTR  $jit_locals
+INSTR  $jit_locals + 0x8
+INSTR  $jit_locals + 0x14
+RETURN $jit_locals + 0x14
+INSTR  test_jit_locals + 0x8
+RETURN test_jit_locals + 0x8
+test_jit_locals() =>
+;;; STDOUT ;;)
